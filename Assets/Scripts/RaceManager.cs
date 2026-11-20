@@ -32,10 +32,24 @@ public class RaceManager : MonoBehaviour
     private BestTimeStore _bestTime;
     private TuningSetup _tuning;
 
+    /// <summary>Where the car stages. Falls back to the world origin when no start marker is assigned.</summary>
+    public Vector3 StartPosition => startLine != null ? startLine.position : Vector3.zero;
+
+    /// <summary>Finish-line Z. Falls back to start + strip length when no finish marker is assigned.</summary>
+    public float FinishZ => finishLine != null ? finishLine.position.z : StartPosition.z + stripLengthMeters;
+
     private void Awake()
     {
+        // Tester fix (VEX 1.2/10): the shipped scene left car / startLine /
+        // finishLine unassigned, so Restart() threw a NullReferenceException
+        // on Play and the game could never run. Resolve everything here so
+        // opening the scene and pressing Play just works.
+        if (car == null) car = GetComponent<CarController>();
         _bestTime = GetComponent<BestTimeStore>() ?? gameObject.AddComponent<BestTimeStore>();
         _tuning = GetComponent<TuningSetup>() ?? gameObject.AddComponent<TuningSetup>();
+        if (GetComponent<DragStripBuilder>() == null) gameObject.AddComponent<DragStripBuilder>();
+        if (GetComponent<DragRacingHud>() == null) gameObject.AddComponent<DragRacingHud>();
+        if (GetComponent<DragRacingInput>() == null) gameObject.AddComponent<DragRacingInput>();
     }
 
     private void Start()
@@ -46,17 +60,25 @@ public class RaceManager : MonoBehaviour
     /// <summary>Instant restart: back to staging with no menu reload.</summary>
     public void Restart()
     {
-        car.ResetCar(startLine.position);
+        if (car == null)
+        {
+            Debug.LogError("[RaceManager] No CarController on this object — cannot stage a run.");
+            state = RaceState.Waiting;
+            return;
+        }
+        car.ResetCar(StartPosition);
         elapsedTime = 0f;
         reactionTime = 0f;
         won = false;
         treeLightsLit = 0;
         _treeTimer = 0f;
+        _launchInputTime = 0f;
         state = RaceState.Staging;
     }
 
     public void OnAccelerate(float value)
     {
+        if (car == null) return;
         if (value > 0.1f)
         {
             if (state == RaceState.Staging || state == RaceState.Tree)
@@ -72,12 +94,17 @@ public class RaceManager : MonoBehaviour
         car.SetAccelerate(value);
     }
 
-    public void OnShiftUp() => car.ShiftUp();
+    public void OnShiftUp()
+    {
+        if (car == null) return;
+        car.ShiftUp();
+    }
 
     public void OnRestart() => Restart();
 
     private void Update()
     {
+        if (car == null) return;
         switch (state)
         {
             case RaceState.Staging:
@@ -100,9 +127,13 @@ public class RaceManager : MonoBehaviour
 
             case RaceState.Running:
                 elapsedTime = Time.time - _greenTime;
+                // Held through green (no fresh input event after the tree):
+                // measure the reaction from the green light, not from 0.
+                if (_launchInputTime <= 0f && car.accelerating)
+                    _launchInputTime = Time.time;
                 if (_launchInputTime > 0f && reactionTime <= 0f)
                     reactionTime = _launchInputTime - _greenTime;
-                if (car.transform.position.z >= finishLine.position.z)
+                if (car.transform.position.z >= FinishZ)
                     FinishRun();
                 break;
         }
@@ -113,6 +144,8 @@ public class RaceManager : MonoBehaviour
         state = RaceState.Finished;
         car.canDrive = false;
         won = elapsedTime <= targetTimeSeconds;
-        _bestTime.RecordIfBest(elapsedTime);
+        // Record the tuning that set the best time, so the results screen
+        // can show what the best run was launched with.
+        _bestTime.RecordIfBest(elapsedTime, _tuning.Describe());
     }
 }
